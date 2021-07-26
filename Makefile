@@ -1,5 +1,4 @@
-MINGW32   = C:/Apps/mingw32
-TCL32     = C:/Apps/TCL
+include local.mk
 
 CC32      = $(MINGW32)/bin/gcc
 WINDRES32 = $(MINGW32)/bin/windres

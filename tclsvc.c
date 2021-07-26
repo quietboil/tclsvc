@@ -111,32 +111,72 @@ static void CtrlEventCheck ( ClientData clientData, int flags )
 
 //----------------------------------------------------------------------
 //
-// SvcVwaitCmd:
-//   Implements custom "vwait" command, which returns an error as
-//   cannot allow nested event loops.
+// TraceVarWriteUnset:
+//   Helper that is installed as the watched variable unset and write tracer.
 //
 //----------------------------------------------------------------------
 
-static int SvcVwaitCmd ( ClientData clientData, Tcl_Interp * interp, int objc, Tcl_Obj * const objv[] )
+static char * TraceVarWriteUnset( ClientData clientData, Tcl_Interp * interp, const char * varName, const char * idxName, int flags )
 {
-    Tcl_ResetResult(interp);
-    Tcl_AppendResult(interp, "vwait cannot be used by the service script", NULL);
-    return TCL_ERROR;
+    int * done = clientData;
+    *done = 1;
+    return NULL;
 }
 
 //----------------------------------------------------------------------
 //
 // SvcVwaitCmd:
-//   Implements custom "update" command, which returns an error as
-//   cannot allow nested event loops.
+//   Implements custom "vwait" command. This is almost a verbatim copy of
+//   Tcl_VwaitObjCmd with an additional check for the service termination
+//   request.
+//
+//----------------------------------------------------------------------
+
+static int SvcVwaitCmd ( ClientData clientData, Tcl_Interp * interp, int objc, Tcl_Obj * const objv[] )
+{
+    if ( objc != 2 ) {
+        Tcl_WrongNumArgs(interp, 1, objv, "name");
+        return TCL_ERROR;
+    }
+
+    const char * varName = Tcl_GetString(objv[1]);
+    int done = 0;
+
+    if ( Tcl_TraceVar2(interp, varName, NULL, TCL_GLOBAL_ONLY | TCL_TRACE_WRITES | TCL_TRACE_UNSETS, TraceVarWriteUnset, &done) != TCL_OK ) {
+        return TCL_ERROR;
+    }
+
+    while ( dispatchingEvents && !done && Tcl_DoOneEvent(TCL_ALL_EVENTS) ) { }
+
+    Tcl_UntraceVar(interp, varName, TCL_GLOBAL_ONLY | TCL_TRACE_WRITES | TCL_TRACE_UNSETS, TraceVarWriteUnset, &done);
+
+    if ( !dispatchingEvents ) {
+        Tcl_ResetResult(interp);
+        Tcl_AppendResult(interp, "service is shutting down", NULL);
+        return TCL_ERROR;
+    }
+    return TCL_OK;
+}
+
+//----------------------------------------------------------------------
+//
+// SvcUpdateCmd:
+//   Implements custom "update" command, which might return early, before
+//   processing all pending events if service is requested to stop.
+//   In the case of early termination "update" raises an error.
 //
 //----------------------------------------------------------------------
 
 static int SvcUpdateCmd ( ClientData clientData, Tcl_Interp * interp, int objc, Tcl_Obj * const objv[] )
 {
-    Tcl_ResetResult(interp);
-    Tcl_AppendResult(interp, "update cannot be used by the service script", NULL);
-    return TCL_ERROR;
+    while ( dispatchingEvents && Tcl_DoOneEvent( TCL_ALL_EVENTS | TCL_DONT_WAIT ) ) {}
+
+    if ( !dispatchingEvents ) {
+        Tcl_ResetResult(interp);
+        Tcl_AppendResult(interp, "service is shutting down", NULL);
+        return TCL_ERROR;
+    }
+    return TCL_OK;
 }
 
 //----------------------------------------------------------------------
@@ -287,12 +327,7 @@ void StartAndRunTclService ( char const * svcName )
     SvcReport( EVENTLOG_INFORMATION_TYPE, "%s is running", svcName );
 
     SvcSetStatus( SERVICE_RUNNING, 0 );
-    int eventMask = TCL_ALL_EVENTS;
-    while ( dispatchingEvents ) {
-        if ( Tcl_DoOneEvent( eventMask ) == 0 ) {
-            break;
-        }
-    }
+    while ( dispatchingEvents && Tcl_DoOneEvent( TCL_ALL_EVENTS ) ) { }
     SvcSetStatus( SERVICE_STOP_PENDING, 3000 );
     Tcl_Finalize();
     SvcReport( EVENTLOG_INFORMATION_TYPE, "%s stopped", svcName );
